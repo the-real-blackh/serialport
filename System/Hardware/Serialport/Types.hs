@@ -30,7 +30,7 @@ data SerialPortSettings = SerialPortSettings {
                       stopb        :: StopBits,    -- ^ Number of stop bits
                       parity       :: Parity,      -- ^ Type of parity
                       flowControl  :: FlowControl, -- ^ Type of flowcontrol
-                      timeout      :: Int          -- ^ Timeout when receiving a char in tenth of seconds
+                      timeout      :: Maybe Int    -- ^ Timeout when receiving a char in tenth of seconds
                   }
 
 
@@ -50,5 +50,5 @@ data SerialPortSettings = SerialPortSettings {
 --
 defaultSerialSettings :: SerialPortSettings
 defaultSerialSettings =
-  SerialPortSettings CS9600 8 One NoParity NoFlowControl 1
+  SerialPortSettings CS9600 8 One NoParity NoFlowControl (Just 1)
 

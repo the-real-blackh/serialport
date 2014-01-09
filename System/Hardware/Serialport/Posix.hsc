@@ -3,6 +3,7 @@
 module System.Hardware.Serialport.Posix where
 
 import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Internal as BI
 import qualified Control.Exception as Ex
 import System.Posix.IO
 import System.Posix.Types
@@ -13,6 +14,7 @@ import Foreign.C
 import GHC.IO.Handle
 import GHC.IO.Device
 import GHC.IO.BufferedIO
+import Data.IORef
 import Data.Typeable
 import GHC.IO.Buffer
 import GHC.IO.Encoding
@@ -91,16 +93,18 @@ withEncoding encoding fun = do
 withEncoding _ fun = fun
 #endif
 
+foreign import ccall safe "read"
+   c_safe_read :: CInt -> Ptr CChar -> CSize -> IO CSsize
 
 -- |Receive bytes, given the maximum number
 recv :: SerialPort -> Int -> IO B.ByteString
 recv (SerialPort fd' _) n = do
-  result <- withEncoding char8 $ Ex.try $ fdRead fd' count :: IO (Either IOError (String, ByteCount))
-  case result of
-     Right (str, _) -> return $ B.pack str
-     Left _         -> return B.empty
-  where
-    count = fromIntegral n
+  retRef <- newIORef undefined
+  txt <- BI.create n $ \p -> do
+      ret <- fdReadBuf fd' p (fromIntegral n)
+      writeIORef retRef ret
+  ret <- readIORef retRef
+  return $ B.take (fromIntegral ret) txt
 
 
 -- |Send bytes
@@ -206,6 +210,13 @@ withStopBits termOpts Two =
 
 configureSettings :: TerminalAttributes -> SerialPortSettings -> TerminalAttributes
 configureSettings termOpts settings =
+    (
+        case timeout settings of
+            Just t ->  (`withTime` t) .
+                       (`withMinInput` 0) .
+                       (`withoutMode` ProcessInput)
+            Nothing -> (`withMode` ProcessInput)
+    ) $
     termOpts `withInputSpeed` commSpeedToBaudRate (commSpeed settings)
              `withOutputSpeed` commSpeedToBaudRate (commSpeed settings)
              `withBits` fromIntegral (bitsPerWord settings)
@@ -215,7 +226,6 @@ configureSettings termOpts settings =
              `withoutMode` EnableEcho
              `withoutMode` EchoErase
              `withoutMode` EchoKill
-             `withoutMode` ProcessInput
              `withoutMode` ProcessOutput
              `withoutMode` MapCRtoLF
              `withoutMode` EchoLF
@@ -224,8 +234,6 @@ configureSettings termOpts settings =
              `withoutMode` ExtendedFunctions
              `withMode` LocalMode
              `withMode` ReadEnable
-             `withTime` timeout settings
-             `withMinInput` 0
 
 
 commSpeedToBaudRate :: CommSpeed -> BaudRate
