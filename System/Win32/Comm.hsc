@@ -84,7 +84,7 @@ instance Storable SerialPortSettings where
                  stopb = _stopBits,
                  parity = _parity,
                  flowControl = NoFlowControl,
-                 timeout = 0
+                 timeout = Nothing
                  }
 
 

@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveDataTypeable, ForeignFunctionInterface #-}
 {-# OPTIONS_HADDOCK hide #-}
 module System.Hardware.Serialport.Windows where
 
@@ -10,13 +10,16 @@ import System.Win32.Types
 import System.Win32.File
 import Foreign.Marshal.Alloc
 import System.Hardware.Serialport.Types
+import Control.Applicative
 import Control.Monad
+import Control.Exception (onException)
 import GHC.IO.Handle
 import GHC.IO.Device
 import GHC.IO.BufferedIO
 import Data.Typeable
 import GHC.IO.Buffer
-
+import Foreign.Ptr
+import Foreign.Storable
 
 data SerialPort = SerialPort {
                       handle :: HANDLE,
@@ -26,9 +29,9 @@ data SerialPort = SerialPort {
 
 
 instance RawIO SerialPort where
-  read (SerialPort h _) ptr n = return . fromIntegral =<< win32_ReadFile h ptr (fromIntegral n) Nothing
+  read (SerialPort h _) ptr n = return . fromIntegral =<< safe_ReadFile h ptr (fromIntegral n) Nothing
   readNonBlocking _ _ _ = error "readNonBlocking not implemented"
-  write (SerialPort h _) ptr n = void (win32_WriteFile h ptr (fromIntegral n) Nothing)
+  write (SerialPort h _) ptr n = void (safe_WriteFile h ptr (fromIntegral n) Nothing)
   writeNonBlocking _ _ _ = error "writenonblocking not implemented"
 
 
@@ -73,22 +76,44 @@ openSerial :: String      -- ^ Serial port, such as @COM5@ or @CNCA0@
 openSerial dev settings = do
   h <- createFile ("\\\\.\\" ++ dev) access_mode share_mode security_attr create_mode file_attr template_file
   let serial_port = SerialPort h defaultSerialSettings
-  return =<< setSerialSettings serial_port settings
+  setSerialSettings serial_port settings `onException` closeHandle h
   where
     access_mode = gENERIC_READ .|. gENERIC_WRITE
     share_mode = fILE_SHARE_NONE
     security_attr = Nothing
     create_mode = oPEN_EXISTING
-    file_attr = fILE_ATTRIBUTE_NORMAL -- .|. fILE_FLAG_OVERLAPPED
+    file_attr = 0
     template_file = Nothing
+
+
+safe_ReadFile :: HANDLE -> Ptr a -> DWORD -> Maybe LPOVERLAPPED -> IO DWORD
+safe_ReadFile h buf n mb_over =
+  alloca $ \ p_n -> do
+  failIfFalse_ "ReadFile" $ c_safe_ReadFile h buf n p_n (maybePtr mb_over)
+  peek p_n
+foreign import stdcall safe "windows.h ReadFile"
+  c_safe_ReadFile :: HANDLE -> Ptr a -> DWORD -> Ptr DWORD -> LPOVERLAPPED -> IO Bool
+
+safe_WriteFile :: HANDLE -> Ptr a -> DWORD -> Maybe LPOVERLAPPED -> IO DWORD
+safe_WriteFile h buf n mb_over =
+  alloca $ \ p_n -> do
+  failIfFalse_ "WriteFile" $ c_safe_WriteFile h buf n p_n (maybePtr mb_over)
+  peek p_n
+foreign import stdcall safe "windows.h WriteFile"
+  c_safe_WriteFile :: HANDLE -> Ptr a -> DWORD -> Ptr DWORD -> LPOVERLAPPED -> IO Bool
 
 
 -- |Receive bytes, given the maximum number
 recv :: SerialPort -> Int -> IO B.ByteString
-recv (SerialPort h _) n =
-  allocaBytes n $ \p -> do
-    recv_cnt <- win32_ReadFile h p count overlapped
-    B.packCStringLen (p, fromIntegral recv_cnt)
+recv port@(SerialPort h settings) n = do
+    mOut <- allocaBytes n $ \p -> do
+        recv_cnt <- safe_ReadFile h p count overlapped
+        if timeout settings == Nothing && recv_cnt == 0
+            then pure Nothing
+            else Just <$> B.packCStringLen (p, fromIntegral recv_cnt)
+    case mOut of
+        Just out -> pure out
+        Nothing  -> recv port n
   where
     count = fromIntegral n
     overlapped = Nothing
@@ -100,7 +125,7 @@ send :: SerialPort
         -> IO Int          -- ^ Number of bytes actually sent
 send (SerialPort h _) msg =
   BU.unsafeUseAsCString msg $ \p ->
-    fromIntegral `fmap` win32_WriteFile h p count overlapped
+    fromIntegral `fmap` safe_WriteFile h p count overlapped
   where
     count = fromIntegral $ B.length msg
     overlapped = Nothing
@@ -139,10 +164,26 @@ setSerialSettings :: SerialPort           -- ^ The currently opened serial port
                   -> SerialPortSettings   -- ^ The new settings
                   -> IO SerialPort        -- ^ New serial port
 setSerialSettings (SerialPort h _) new_settings = do
-  let ct = Comm.COMMTIMEOUTS {
-                    Comm.readIntervalTimeout = maxBound :: DWORD,
-                    Comm.readTotalTimeoutMultiplier = maxBound :: DWORD,
-                    Comm.readTotalTimeoutConstant = fromIntegral (timeout new_settings) * 100,
+  let ct = case timeout new_settings of
+               Just 0 ->  -- Case where we always return from read immediately
+                 Comm.COMMTIMEOUTS {
+                    Comm.readIntervalTimeout = maxBound,
+                    Comm.readTotalTimeoutMultiplier = 0,
+                    Comm.readTotalTimeoutConstant = 0,
+                    Comm.writeTotalTimeoutMultiplier = 0,
+                    Comm.writeTotalTimeoutConstant = 0 }
+               Just t ->  -- Case where timeout is specified (in tenths of a second)
+                 Comm.COMMTIMEOUTS {
+                    Comm.readIntervalTimeout = maxBound,
+                    Comm.readTotalTimeoutMultiplier = maxBound,
+                    Comm.readTotalTimeoutConstant = fromIntegral t * 100,  -- convert to ms
+                    Comm.writeTotalTimeoutMultiplier = 0,
+                    Comm.writeTotalTimeoutConstant = 0 }
+               Nothing ->  -- Block until characters are received
+                 Comm.COMMTIMEOUTS {
+                    Comm.readIntervalTimeout = maxBound,
+                    Comm.readTotalTimeoutMultiplier = maxBound,
+                    Comm.readTotalTimeoutConstant = 500,
                     Comm.writeTotalTimeoutMultiplier = 0,
                     Comm.writeTotalTimeoutConstant = 0 }
   Comm.setCommTimeouts h ct
