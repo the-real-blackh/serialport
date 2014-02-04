@@ -3,6 +3,7 @@
 module System.Hardware.Serialport.Posix where
 
 import Control.Applicative
+import Control.Exception (onException)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Internal as BI
 import qualified Data.ByteString.Unsafe as BU
