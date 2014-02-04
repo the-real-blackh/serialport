@@ -145,12 +145,13 @@ send (SerialPort h _) msg =
 flush :: SerialPort -> IO ()
 flush s@(SerialPort h _) =
   flushFileBuffers h
+  {- TO DO: Fix
   >> consumeIncomingChars
   where
     consumeIncomingChars = do
       ch <- recv s 1
       unless (ch == B.empty) consumeIncomingChars
-
+  -}
 
 -- |Close the serial port
 closeSerial :: SerialPort -> IO ()
