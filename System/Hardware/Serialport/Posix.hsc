@@ -81,10 +81,7 @@ openSerial dev settings = do
       `onException` close fd'
   return serial_port
 
-
-foreign import ccall safe "read"
-   c_safe_read :: CInt -> Ptr CChar -> CSize -> IO CSsize
-
+  
 -- |Receive bytes, given the maximum number
 recv :: SerialPort -> Int -> IO B.ByteString
 recv (SerialPort fd' _) n = do
@@ -208,6 +205,7 @@ configureSettings termOpts settings =
              `withoutMode` EnableEcho
              `withoutMode` EchoErase
              `withoutMode` EchoKill
+             `withoutMode` ProcessInput
              `withoutMode` ProcessOutput
              `withoutMode` MapCRtoLF
              `withoutMode` EchoLF
@@ -216,7 +214,6 @@ configureSettings termOpts settings =
              `withoutMode` ExtendedFunctions
              `withMode` LocalMode
              `withMode` ReadEnable
-             `withMode` ProcessInput
 
 
 commSpeedToBaudRate :: CommSpeed -> BaudRate
