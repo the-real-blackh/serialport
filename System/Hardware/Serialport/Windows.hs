@@ -115,7 +115,7 @@ foreign import stdcall safe "windows.h WriteFile"
 
 -- |Receive bytes, given the maximum number
 recv :: SerialPort -> Int -> IO B.ByteString
-recv port@(SerialPort h settings) n = do
+recv port@(SerialPort h _) n = do
     mOut <- allocaBytes n $ \p -> do
         recv_cnt <- safe_ReadFile h p count overlapped
         if recv_cnt == 0
@@ -143,7 +143,7 @@ send (SerialPort h _) msg =
 
 -- |Flush buffers
 flush :: SerialPort -> IO ()
-flush s@(SerialPort h _) =
+flush (SerialPort h _) =
   flushFileBuffers h
   {- TO DO: Fix
   >> consumeIncomingChars
