@@ -75,9 +75,18 @@ openSerial :: String      -- ^ Serial port, such as @COM5@ or @CNCA0@
            -> SerialPortSettings
            -> IO SerialPort
 openSerial dev settings = do
-  h <- createFile ("\\\\.\\" ++ dev) access_mode share_mode security_attr create_mode file_attr template_file
-  let serial_port = SerialPort h defaultSerialSettings
-  setSerialSettings serial_port settings `onException` closeHandle h
+    h <- createFile ("\\\\.\\" ++ dev) access_mode share_mode security_attr create_mode file_attr template_file
+    serial_port <- SerialPort h <$> newIORef defaultSerialSettings
+    do
+        Comm.setCommTimeouts h $ Comm.COMMTIMEOUTS {
+                    Comm.readIntervalTimeout = maxBound,
+                    Comm.readTotalTimeoutMultiplier = maxBound,
+                    Comm.readTotalTimeoutConstant = 200,
+                    Comm.writeTotalTimeoutMultiplier = 0,
+                    Comm.writeTotalTimeoutConstant = 0 }
+        setSerialSettings serial_port settings
+      `onException` closeHandle h
+    return serial_port
   where
     access_mode = gENERIC_READ .|. gENERIC_WRITE
     share_mode = fILE_SHARE_NONE
@@ -109,7 +118,7 @@ recv :: SerialPort -> Int -> IO B.ByteString
 recv port@(SerialPort h settings) n = do
     mOut <- allocaBytes n $ \p -> do
         recv_cnt <- safe_ReadFile h p count overlapped
-        if timeout settings == Nothing && recv_cnt == 0
+        if recv_cnt == 0
             then pure Nothing
             else Just <$> B.packCStringLen (p, fromIntegral recv_cnt)
     case mOut of
@@ -163,18 +172,9 @@ setRTS (SerialPort h _ ) False = Comm.escapeCommFunction h Comm.clrRTS
 -- |Configure the serial port
 setSerialSettings :: SerialPort           -- ^ The currently opened serial port
                   -> SerialPortSettings   -- ^ The new settings
-                  -> IO SerialPort        -- ^ New serial port
-setSerialSettings (SerialPort h _) new_settings = do
-  Comm.setCommTimeouts h $ Comm.COMMTIMEOUTS {
-                    Comm.readIntervalTimeout = maxBound,
-                    Comm.readTotalTimeoutMultiplier = maxBound,
-                    Comm.readTotalTimeoutConstant = 500,
-                    Comm.writeTotalTimeoutMultiplier = 0,
-                    Comm.writeTotalTimeoutConstant = 0 }
-
+                  -> IO ()                -- ^ New serial port
+setSerialSettings (SerialPort h _) new_settings =
   Comm.setCommState h new_settings
-
-  return (SerialPort h)
 
 
 -- |Get configuration from serial port

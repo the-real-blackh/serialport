@@ -77,6 +77,7 @@ openSerial dev settings = do
   (fd', _) <- openFile dev ReadWriteMode False
   serial_port <- SerialPort fd' <$> newIORef defaultSerialSettings
   setSerialSettings serial_port settings
+      `onException` close fd'
   return serial_port
 
 

@@ -83,8 +83,7 @@ instance Storable SerialPortSettings where
                  bitsPerWord = _byteSize,
                  stopb = _stopBits,
                  parity = _parity,
-                 flowControl = NoFlowControl,
-                 timeout = Nothing
+                 flowControl = NoFlowControl
                  }
 
 
