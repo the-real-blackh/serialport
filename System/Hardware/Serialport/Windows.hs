@@ -13,6 +13,7 @@ import System.Hardware.Serialport.Types
 import Control.Applicative
 import Control.Monad
 import Control.Exception (onException)
+import Data.IORef
 import GHC.IO.Handle
 import GHC.IO.Device
 import GHC.IO.BufferedIO
@@ -23,7 +24,7 @@ import Foreign.Storable
 
 data SerialPort = SerialPort {
                       handle :: HANDLE,
-                      portSettings :: SerialPortSettings
+                      portSettings :: IORef SerialPortSettings
                   }
                   deriving (Typeable)
 
@@ -164,35 +165,18 @@ setSerialSettings :: SerialPort           -- ^ The currently opened serial port
                   -> SerialPortSettings   -- ^ The new settings
                   -> IO SerialPort        -- ^ New serial port
 setSerialSettings (SerialPort h _) new_settings = do
-  let ct = case timeout new_settings of
-               Just 0 ->  -- Case where we always return from read immediately
-                 Comm.COMMTIMEOUTS {
-                    Comm.readIntervalTimeout = maxBound,
-                    Comm.readTotalTimeoutMultiplier = 0,
-                    Comm.readTotalTimeoutConstant = 0,
-                    Comm.writeTotalTimeoutMultiplier = 0,
-                    Comm.writeTotalTimeoutConstant = 0 }
-               Just t ->  -- Case where timeout is specified (in tenths of a second)
-                 Comm.COMMTIMEOUTS {
-                    Comm.readIntervalTimeout = maxBound,
-                    Comm.readTotalTimeoutMultiplier = maxBound,
-                    Comm.readTotalTimeoutConstant = fromIntegral t * 100,  -- convert to ms
-                    Comm.writeTotalTimeoutMultiplier = 0,
-                    Comm.writeTotalTimeoutConstant = 0 }
-               Nothing ->  -- Block until characters are received
-                 Comm.COMMTIMEOUTS {
+  Comm.setCommTimeouts h $ Comm.COMMTIMEOUTS {
                     Comm.readIntervalTimeout = maxBound,
                     Comm.readTotalTimeoutMultiplier = maxBound,
                     Comm.readTotalTimeoutConstant = 500,
                     Comm.writeTotalTimeoutMultiplier = 0,
                     Comm.writeTotalTimeoutConstant = 0 }
-  Comm.setCommTimeouts h ct
 
   Comm.setCommState h new_settings
 
-  return (SerialPort h new_settings)
+  return (SerialPort h)
 
 
 -- |Get configuration from serial port
-getSerialSettings :: SerialPort -> SerialPortSettings
-getSerialSettings = portSettings
+getSerialSettings :: SerialPort -> IO SerialPortSettings
+getSerialSettings = readIORef . portSettings

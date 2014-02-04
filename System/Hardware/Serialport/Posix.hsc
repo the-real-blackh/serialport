@@ -2,10 +2,10 @@
 {-# OPTIONS_HADDOCK hide #-}
 module System.Hardware.Serialport.Posix where
 
+import Control.Applicative
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Internal as BI
-import qualified Control.Exception as Ex
-import System.Posix.IO
+import qualified Data.ByteString.Unsafe as BU
 import System.Posix.Types
 import System.Posix.Terminal
 import System.Hardware.Serialport.Types
@@ -16,47 +16,46 @@ import GHC.IO.Device
 import GHC.IO.BufferedIO
 import Data.IORef
 import Data.Typeable
-import GHC.IO.Buffer
-import GHC.IO.Encoding
-import Control.Monad (void)
+import GHC.IO.FD
+import GHC.IO.IOMode
 import Data.Bits
+import Prelude hiding (read)
 
 
 data SerialPort = SerialPort {
-                      fd :: Fd,
-                      portSettings :: SerialPortSettings
-                  }
-                  deriving (Typeable)
-
+                         fd :: FD,
+                         portSettings :: IORef SerialPortSettings
+                     }
+                     deriving (Typeable)
 
 instance RawIO SerialPort where
-  read (SerialPort fd' _) ptr n = return . fromIntegral =<< fdReadBuf fd' ptr (fromIntegral n)
-  readNonBlocking _ _ _ = error "readNonBlocking not implemented"
-  write (SerialPort fd' _) ptr n = void (fdWriteBuf fd' ptr (fromIntegral n))
-  writeNonBlocking _ _ _ = error "writenonblocking not implemented"
-
+  read s             = read (fd s)
+  readNonBlocking s  = readNonBlocking (fd s)
+  write s            = write (fd s)
+  writeNonBlocking s = writeNonBlocking (fd s)
 
 instance IODevice SerialPort where
-  ready _ _ _ = return True
-  close = closeSerial
-  isTerminal _ = return False
-  isSeekable _ = return False
-  seek _ _ _ = return ()
-  tell _ = return 0
-  getSize _ = return 0
-  setSize _ _ = return ()
-  setEcho _ _ = return ()
-  getEcho _ = return False
-  setRaw _ _ = return ()
-  devType _ = return Stream
-
+  ready s        = ready (fd s)
+  close s        = close (fd s)
+  isTerminal s   = isTerminal (fd s)
+  isSeekable s   = isSeekable (fd s)
+  seek s         = seek (fd s)
+  tell s         = tell (fd s)
+  getSize s      = getSize (fd s)
+  setSize s      = setSize (fd s)
+  setEcho s      = setEcho (fd s)
+  getEcho s      = getEcho (fd s)
+  setRaw s       = setRaw (fd s)
+  devType s      = devType (fd s)
+  dup (SerialPort fd1 set)  = SerialPort <$> dup fd1 <*> pure set
+  dup2 (SerialPort fd1 set) (SerialPort fd2 _) = SerialPort <$> dup2 fd1 fd2 <*> pure set
 
 instance BufferedIO SerialPort where
-  newBuffer _ = newByteBuffer 100
-  fillReadBuffer = readBuf
-  fillReadBuffer0 = readBufNonBlocking
-  flushWriteBuffer = writeBuf
-  flushWriteBuffer0 = writeBufNonBlocking
+  newBuffer s         = newBuffer (fd s)
+  fillReadBuffer    s = fillReadBuffer (fd s)
+  fillReadBuffer0   s = fillReadBuffer0 (fd s)
+  flushWriteBuffer  s = flushWriteBuffer (fd s)
+  flushWriteBuffer0 s = flushWriteBuffer0 (fd s)
 
 
 -- |Open and configure a serial port returning a standard Handle
@@ -75,23 +74,11 @@ openSerial :: FilePath            -- ^ Serial port, such as @\/dev\/ttyS0@ or @\
            -> SerialPortSettings
            -> IO SerialPort
 openSerial dev settings = do
-  fd' <- openFd dev ReadWrite Nothing defaultFileFlags { noctty = True }
-  let serial_port = SerialPort fd' defaultSerialSettings
-  return =<< setSerialSettings serial_port settings
+  (fd', _) <- openFile dev ReadWriteMode False
+  serial_port <- SerialPort fd' <$> newIORef defaultSerialSettings
+  setSerialSettings serial_port settings
+  return serial_port
 
-
--- |Use specific encoding for an action and restore old encoding afterwards
-withEncoding :: TextEncoding -> IO a -> IO a
-#if MIN_VERSION_base(4,5,0)
-withEncoding encoding fun = do
-  cur_enc <- getForeignEncoding
-  setForeignEncoding encoding
-  result <- fun
-  setForeignEncoding cur_enc
-  return result
-#else
-withEncoding _ fun = fun
-#endif
 
 foreign import ccall safe "read"
    c_safe_read :: CInt -> Ptr CChar -> CSize -> IO CSsize
@@ -101,7 +88,7 @@ recv :: SerialPort -> Int -> IO B.ByteString
 recv (SerialPort fd' _) n = do
   retRef <- newIORef undefined
   txt <- BI.create n $ \p -> do
-      ret <- fdReadBuf fd' p (fromIntegral n)
+      ret <- readRawBufferPtr "Serialport.recv" fd' p 0 (fromIntegral n)
       writeIORef retRef ret
   ret <- readIORef retRef
   return $ B.take (fromIntegral ret) txt
@@ -111,20 +98,20 @@ recv (SerialPort fd' _) n = do
 send :: SerialPort
         -> B.ByteString
         -> IO Int          -- ^ Number of bytes actually sent
-send (SerialPort fd' _ ) msg = do
-  ret <- withEncoding char8 (fdWrite fd' (B.unpack msg))
-  return $ fromIntegral ret
+send (SerialPort fd' _) msg =
+  fromIntegral <$> BU.unsafeUseAsCStringLen msg
+     (\(p, len) -> writeRawBufferPtr "Serialport.send" fd' (castPtr p) 0 (fromIntegral len))
 
 
 -- |Flush buffers
 flush :: SerialPort -> IO ()
 flush (SerialPort fd' _) =
-  discardData fd' BothQueues
+  discardData (Fd (fdFD fd')) BothQueues
 
 
 -- |Close the serial port
 closeSerial :: SerialPort -> IO ()
-closeSerial = closeFd . fd
+closeSerial = close . fd
 
 
 #include <sys/ioctl.h>
@@ -150,8 +137,8 @@ setTIOCM fd' val =
 -- |Set the Data Terminal Ready level
 setDTR :: SerialPort -> Bool -> IO ()
 setDTR (SerialPort fd' _) set = do
-  current <- getTIOCM fd'
-  setTIOCM fd' $ if set
+  current <- getTIOCM (Fd (fdFD fd'))
+  setTIOCM (Fd (fdFD fd')) $ if set
                    then current .|. #{const TIOCM_DTR}
                    else current .&. complement #{const TIOCM_DTR}
 
@@ -159,8 +146,8 @@ setDTR (SerialPort fd' _) set = do
 -- |Set the Ready to send level
 setRTS :: SerialPort -> Bool -> IO ()
 setRTS (SerialPort fd' _) set = do
-  current <- getTIOCM fd'
-  setTIOCM fd' $ if set
+  current <- getTIOCM (Fd (fdFD fd'))
+  setTIOCM (Fd (fdFD fd')) $ if set
                    then current .|. #{const TIOCM_RTS}
                    else current .&. complement #{const TIOCM_RTS}
 
@@ -168,17 +155,17 @@ setRTS (SerialPort fd' _) set = do
 -- |Configure the serial port
 setSerialSettings :: SerialPort           -- ^ The currently opened serial port
                   -> SerialPortSettings   -- ^ The new settings
-                  -> IO SerialPort        -- ^ New serial port
-setSerialSettings (SerialPort fd' _) new_settings = do
-  termOpts <- getTerminalAttributes fd'
+                  -> IO ()                -- ^ New serial port
+setSerialSettings (SerialPort fd' settingsRef) new_settings = do
+  termOpts <- getTerminalAttributes (Fd (fdFD fd'))
   let termOpts' = configureSettings termOpts new_settings
-  setTerminalAttributes fd' termOpts' Immediately
-  return (SerialPort fd' new_settings)
+  setTerminalAttributes (Fd (fdFD fd')) termOpts' Immediately
+  writeIORef settingsRef new_settings
 
 
 -- |Get configuration from serial port
-getSerialSettings :: SerialPort -> SerialPortSettings
-getSerialSettings = portSettings
+getSerialSettings :: SerialPort -> IO SerialPortSettings
+getSerialSettings = readIORef . portSettings
 
 
 withParity :: TerminalAttributes -> Parity -> TerminalAttributes
@@ -210,13 +197,6 @@ withStopBits termOpts Two =
 
 configureSettings :: TerminalAttributes -> SerialPortSettings -> TerminalAttributes
 configureSettings termOpts settings =
-    (
-        case timeout settings of
-            Just t ->  (`withTime` t) .
-                       (`withMinInput` 0) .
-                       (`withoutMode` ProcessInput)
-            Nothing -> (`withMode` ProcessInput)
-    ) $
     termOpts `withInputSpeed` commSpeedToBaudRate (commSpeed settings)
              `withOutputSpeed` commSpeedToBaudRate (commSpeed settings)
              `withBits` fromIntegral (bitsPerWord settings)
@@ -234,6 +214,7 @@ configureSettings termOpts settings =
              `withoutMode` ExtendedFunctions
              `withMode` LocalMode
              `withMode` ReadEnable
+             `withMode` ProcessInput
 
 
 commSpeedToBaudRate :: CommSpeed -> BaudRate
